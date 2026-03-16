@@ -1,0 +1,611 @@
+<html>
+
+<head>
+<style>
+body {
+  font-family: "Calibri", "Optima";
+  background-color: #f0f0e0;
+  overflow-y: scroll;
+  margin-right: 20%;
+}
+table,th,td {
+  border-collapse: collapse;
+  padding: 2px;
+}
+#divWord, #spanPatternWord {
+  font-size: 200%;
+  font-family: "TEST_FONT";
+}
+#glyphsHarfBuzz,#glyphsDirectWrite,#glyphsUniscribe {
+  font-family: 'Consolas',monospace;
+  font-size: 70%;
+}
+.gdIndex { display: inline-block; min-width: 36px; }
+</style>
+</head>
+<body>
+
+<script type="text/javascript" src="./js/hbjs-12.3.0/hb.js"></script> <!-- Module - REQUIRED -->
+<script type="text/javascript" src="./js/hbjs.js"></script> <!-- Wrapper, can be used without -->
+<script type="text/javascript" src="./js/svghandler.js"></script>
+<script type="text/javascript" src="./js/progresspanel.js"></script>
+<script type="text/javascript" src="./js/doubletap.js"></script>
+<script type="text/javascript" src="./js/dragdrop.js"></script>
+<script type="text/javascript" src="./js/shortcut.js"></script>
+
+<script type='module' async defer>
+'use strict';
+
+import { HarfBuzzShaping, jsonToSvg } from './js/hbshaping.mjs';
+const hbs = new HarfBuzzShaping;
+
+const promises = [
+  createHarfBuzz()
+  ];
+
+Promise.all(promises).then(([aModuleHarfBuzz]) => {
+  window.hb = hbjs(aModuleHarfBuzz);
+  hbs.setHarfBuzz(window.hb);
+  onResourcesLoaded();
+});
+
+window.hbs = hbs;
+window.jsonToSvg = jsonToSvg;
+
+async function onResourcesLoaded() {
+  // TODO
+}
+
+</script>
+
+<h1>Windows Shaping Compare Visualizer</h1>
+<div id='divLOAD'>
+  <h2>Load Files</h2>
+  <table border=1 width='75%' id='ddFiles'>
+    <tr>
+      <td width='15%'>1. Word List</td>
+      <td width='25%' id='ddWscFile'>
+        Drag Windows Shaping Compare <b>*.wsc.txt</b> file
+      </td>
+      <td width='30%'>
+        <span id='ddWscFileName'></span>
+      </td>
+      <td width='30%'>
+        <span id='ddWscFileResult'></span>
+      </td>
+    </tr>
+    <tr>
+      <td>2. Font</td>
+      <td id='ddFontFile'>
+        Drag Font <b>*.ttf</b> file
+      </td>
+      <td><span id='ddFontFileName'></span></td>
+      <td><div id='divError' style='color: red;'></div> <span id='ddFontFileResult'></span></td>
+    </tr>
+  </table>
+</div>
+<div id='divINST'>
+<p>To use this tool, first you must generate a *.wsc.txt file. This file has the shaping data for each of the chosen complex shaping engines.</p>
+<p>Run `ShapingCompare.exe` on Windows.</p>
+</div>
+
+<div id='divMAIN' hidden>
+<table width='100%' border='0'>
+  <tr>
+    <td width='14%' align='right'>Index:</td>
+    <td width='14%'><input type='text' id='inpIndex' value='0'></input> <span id='spanIndex'></span></td>
+    <td width='14%'><button id='btnGoIndex'>Go</button> </td>
+    <td width='14%' valign='top'><div id='divWord'>&nbsp;</div></td>
+  </tr>
+  <tr>
+    <td>
+    </td>
+    <td>
+        <input type='radio' id='radPatternAll' name='radPattern' value='all'>All</input>
+    </td>
+    <td>
+        <input type='radio' id='radPatternDifferent' name='radPattern' value='different' checked>Different</input>
+    </td>
+    <td>
+        <input type='radio' id='radPatternSame' name='radPattern' value='same'>Same</input>
+    </td>
+  </tr>
+  <tr>
+    <td><button id='btnFirst' accesskey='1'>First (Alt-1)</button></td>
+    <td><button id='btnPrev'  accesskey='2'>Prev (Alt-2)</button></td>
+    <td><button id='btnNext'  accesskey='3'>Next (Alt-3)</button></td>
+    <td><button id='btnLast'  accesskey='4'>Last (Alt-4)</button></td>
+  </tr>
+</table>
+<table width='100%' border='1'>
+  <tr>
+    <td width='33%'>
+      <h2 id='headHarfBuzz'>HarfBuzz</h2>
+      <div id='svgHarfBuzz'></div>
+      <script>insertSvgZoomControls('svgHarfBuzz');</script>
+    </td>
+    <td width='33%'>
+      <h2 id='headDirectWrite'>DirectWrite</h2>
+      <div id='svgDirectWrite'></div>
+      <script>insertSvgZoomControls('svgDirectWrite');</script>
+    </td>
+    <td width='33%'>
+      <h2 id='headUniscribe'>Uniscribe</h2>
+      <div id='svgUniscribe'></div>
+      <script>insertSvgZoomControls('svgUniscribe');</script>
+    </td>
+  </tr>
+  <tr>
+    <td><div id='glyphsHarfBuzz'></div>
+    <td><div id='glyphsDirectWrite'></div>
+    <td><div id='glyphsUniscribe'></div>
+  </tr>
+</table>
+</div>
+
+<script>
+
+/*
+ * Test the ingestion of the Windows Shaping Compare output
+ *
+ */
+
+
+async function loadFileUrl(url) {
+  const response = await fetch(url);
+  const content = await response.text();
+  //wordList.addWords(words);
+  return content;
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloader = () => resolve(reader.result); // Resolve with content
+    reader.onerror  = () => reject(reader.error);   // Reject on error
+    reader.readAsText(file); // Start reading
+  });
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloader = () => resolve(reader.result); // Resolve with content
+    reader.onerror  = () => reject(reader.error);   // Reject on error
+    reader.readAsArrayBuffer(file); // Start reading
+  });
+}
+
+function saveTextToFile(txt, filename) {
+  let bb = new Blob([txt], {type: 'text/plain;charset=utf-8'});
+  let a = document.createElement('a');
+  a.download = filename;
+  a.href = window.URL.createObjectURL(bb);
+  a.target='_blank';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function textToLines(txt) {
+  return txt.split(/\r?\n+/g);
+}
+
+function glyphTextToArray(glyphText) {
+  const glyphs = [];
+  const glyphsText = glyphText.split(';');
+  glyphsText.pop();
+  glyphsText.forEach(v=>{
+    const ga = v.split(',');
+    glyphs.push({
+      g:  Number(ga[0]),
+      dx: Number(ga[1]),
+      dy: Number(ga[2]),
+      ax: Number(ga[3]),
+    });
+  });
+  return glyphs;
+}
+
+function parseWsc(lines) {
+  const res = [];
+  let word = '';
+  let entry;
+  let countGood = 0;
+  let countFail = 0;
+  const shapingSet = new Set();
+  for (let i=0; i<lines.length; i++) {
+    const line = lines[i];
+    if (line.length == 0) continue;
+    const comment = line.match(/^\s+#\s+(\w+):\s+(.+)/u);
+    if (comment) {
+      if (comment[1] == 'FONTFILE') res.fontFile = comment[2]; else
+      if (comment[1] == 'FONTNAME') res.fontName = comment[2]; else
+      if (comment[1] == 'FONTVERS') res.fontVersion = comment[2]; else
+      if (comment[1] == 'WORDFILE') res.wordFile = comment[2];
+
+    }
+    const m = line.match(/^([^\s]?[^#\s]+)/u);  // Extract a word at the beginning - up to a space or hash
+    if (m) {
+      res.push({w:m[1]});
+      entry = res[res.length-1];
+    } else {
+      const r = line.match(/^\t(\w+)(#|:)(.+)/u);
+      if (!r) continue;
+      const glyphText = r[3];
+      const failed = r[2] !== ':';
+      entry[r[1]] = {
+        g:glyphText,
+      }
+      shapingSet.add(r[1]);
+      if (failed) entry[r[1]].fail=true;
+    }
+  }
+  for (let i=0; i<res.length; i++) {
+    const e = res[i];
+    if (e?.hb?.fail || e?.dw?.fail || e?.us?.fail)
+      countFail++;
+    else
+      countGood++;
+  }
+  res.stats = {
+    fail: countFail,
+    good: countGood,
+    total: countFail + countGood,
+    shapers: shapingSet,
+  }
+  return res;
+}
+
+//--//const Lists = {}; // Test code
+let wscFile;
+let wscDiffs;
+let currentIndex = 0;
+let currentDiff;
+let fontFile;
+
+/*--
+async function loadLists() {
+  const txt = await loadFileUrl('./diffs.wsc.txt');
+  Lists.diffs = textToLines(txt);
+  console.log(Lists.diffs.length);
+}
+
+async function test() {
+  const map = new Map();
+  for (let i=0; i<Lists.fff.length; i++) {
+    const e = Lists.fff[i];
+    map.set(e.w, e);
+  }
+  Lists.map = map;
+
+  let txt = '';
+  for (let i=0; i<Lists.gpe.length; i++) {
+    const e = Lists.gpe[i];
+    const fe = map.get(e.w);
+    txt += `${e.l}\t`;
+    if (fe) txt += `${fe.l}`;
+    txt += `\r\n`;
+  }
+
+  saveTextToFile(txt, 'blend.txt');
+}
+--*/
+
+function deleteFontByName(name) {
+  document.fonts.forEach(
+    (v) => {
+      if (v.family == name) {
+        document.fonts.delete(v);
+      }
+    }
+  );
+}
+
+async function applyFont(fontname, data) {
+  const fontFace = new FontFace(fontname, data);
+  fontFace.load().then( () => {
+    deleteFontByName(fontname);
+    document.fonts.add(fontFace);
+  }, (err)=> {console.error(err); });
+}
+
+
+async function handleDropWordTTF(fileObject) {
+  const file = fileObject.file;
+  const filename = fileObject.filename;
+  const buff = await file.arrayBuffer();
+  applyFont('TEST_FONT', buff);
+}
+
+async function handleWordDropFiles(file, event, files) {
+  for (let i=0; i<files.length; i++) {
+    file = files[i];
+    const filename = file.name.toLowerCase();
+    if (filename.endsWith('.ttf')) {
+      await handleDropWordTTF({file:file, filename:filename});
+    } else
+      window.alert(`File extension "${filename}" not relevant`);
+  }
+}
+
+
+function wrapSvg(svg, dimensions={}) {
+  const { xmin=-250, ymin=-1800, height=3000, heightOut=400, widthOut=undefined, element=window } = dimensions;
+  let width = height / heightOut * 0.95;
+  let widthString = '';
+  if (typeof widthOut === 'number') {
+    width = widthOut * width;
+    widthString = `width="${widthOut}px" `
+  } else {
+    width = element.innerWidth * width;
+  }
+  return `<svg main="http://www.w3.org/2000/svg" height="${heightOut}" ${widthString}viewBox="${xmin} ${ymin} ${width} ${height}">${svg}</svg>`;
+  //return `<svg main="http://www.w3.org/2000/svg" height="${heightOut}" viewBox="${xmin} ${ymin} ${width} ${height}">${svg}</svg>`;
+}
+
+
+function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
+  const glyphs = glyphTextToArray(glyphData.g);
+  const glyphsRef = (ref && glyphData.fail) ? glyphTextToArray(ref.g) : undefined;
+  let svg = '';
+  let gtxt = '';
+  let x = 0;
+  let y = 0;
+
+  // Do the 'difference' highlight first
+  if (glyphData.fail) {
+    eleGlyphs.style.backgroundColor = '#fcc';
+    /*
+    const glyphsRef = glyphTextToArray(ref.g);
+    for (let i=0; i<glyphs.length; i++) {
+      const ge = glyphs[i];
+      const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;
+      if (!gr || (gr.g !== ge.g) || (gr.dx !== ge.dx) || (gr.dy !== ge.dy) || (gr.ax !== ge.ax)) {
+        svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.7;" d="M ${x} ${y} `;
+        const gj = hbs.glyphToRelativeJson(ge.g);
+        svg += jsonToSvg(gj.json);
+        svg += `"/>`;
+      }
+      x += ge.ax;
+    }
+    */
+  } else {
+    eleGlyphs.style.backgroundColor = '';
+  }
+
+  x = 0;
+  y = 0;
+  for (let i=0; i<glyphs.length; i++) {
+    const ge = glyphs[i];
+    gtxt += `<span class='gdIndex'>#${i+1}</span> `+
+        `<span class='gdIndex'>${ge.g}</span> `+
+        `<span class='gdIndex'>${ge.dx}</span> `+
+        `<span class='gdIndex'>${ge.dy}</span> `+
+        `<span class=gdIndex''>${ge.ax}</span><br/>\r\n`;
+
+    let color = 'black';
+    if (glyphsRef) {
+      const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;
+      if (!gr || (gr.g !== ge.g)) {
+        color = '#e22';
+      } else
+      if ((gr.dx !== ge.dx) || (gr.dy !== ge.dy) || (gr.ax !== ge.ax))
+        color = '#28c';
+    }
+    svg += `<path style="fill:${color};fill-opacity:1;" d="M ${x+ge.dx} ${y-ge.dy} `;
+    const gj = hbs.glyphToRelativeJson(ge.g);
+    svg += jsonToSvg(gj.json);
+    svg += `"/>`;
+    x += ge.ax;
+  }
+
+  eleGlyphs.innerHTML = gtxt;
+
+  svg = wrapSvg(svg, {
+    xmin: -250,
+    ymin: -1800,
+    height: 3000,
+    heightOut: 100,
+    widthOut: 400,
+    element: eleSvg,
+  });
+  updateSvg(eleSvg, svg);
+}
+
+function showRenderingAll(entry) {
+  const ref = entry.hb ? entry.hb : entry.dw;
+  if (entry.hb) showRendering(svgHarfBuzz,    glyphsHarfBuzz,    entry.hb);
+  if (entry.dw) showRendering(svgDirectWrite, glyphsDirectWrite, entry.dw, ref);
+  if (entry.us) showRendering(svgUniscribe,   glyphsUniscribe,   entry.us, ref);
+}
+
+function showIndex(index) {
+  if (index < 0) index = 0;
+  if (index >= wscDiffs.length) index = wscDiffs.length - 1;
+  currentDiff = wscDiffs[index];
+  divWord.innerText = currentDiff.w;
+  showRenderingAll(currentDiff);
+  inpIndex.value = index + 1;
+}
+
+function isFail(index) {
+  return wscDiffs[index]?.dw?.fail || wscDiffs[index]?.us?.fail;
+}
+
+function gotoWhich(forwards, firstLast) {
+  if (firstLast) {
+    if (forwards)
+      currentIndex = 0;
+    else
+      currentIndex = wscDiffs.length - 1;
+  } else {
+    if (forwards) {
+      currentIndex++;
+    } else {
+      currentIndex--;
+    }
+  }
+  if (currentIndex < 0) currentIndex = 0;
+  if (currentIndex >= wscDiffs.length) currentIndex = wscDiffs.length - 1;
+
+  let invert = false;
+  let jump = radPatternDifferent.checked || radPatternSame.checked;
+  if (radPatternSame.checked) invert = true;
+  if (jump) {
+    if (forwards) {
+      while (currentIndex < wscDiffs.length) {
+        if (invert ^ isFail(currentIndex)) break;
+        currentIndex++;
+      }
+    } else {
+      while (currentIndex > 0) {
+        if (invert ^ isFail(currentIndex)) break;
+        currentIndex--;
+      }
+    }
+  }
+  showIndex(currentIndex);
+}
+
+function gotoFirst() {
+  gotoWhich(true, true);
+}
+
+function gotoLast() {
+  gotoWhich(false, true);
+}
+
+function gotoPrev() {
+  gotoWhich(false);
+}
+
+function gotoNext() {
+  gotoWhich(true);
+}
+
+function gotoIndex() {
+  const txt = inpIndex.value;
+  if (isNaN(txt)) {
+    // Perform a search
+    const diffOnly = radPatternDifferent.checked;
+    for (let i=currentIndex; i<wscDiffs.length; i++) {
+      const w = wscDiffs[i].w;
+      if ((w.search(txt) >=0) && (!diffOnly || isFail(i))) {
+        currentIndex = i;
+        showIndex(currentIndex);
+        break;
+      }
+    }
+  } else {
+    currentIndex = parseInt(txt) - 1;
+    showIndex(currentIndex);
+  }
+}
+
+async function doProcess() {
+  // TODO
+}
+
+
+function decideButtonProcessEnable() {
+  if (!wscFile?.loaded) return;
+  if (!fontFile?.loaded) return;
+  //btnProcess.disabled = false;
+
+  if (hbs.getFontFullName() !== wscDiffs.fontName) {
+    divError.innerText = `Expecting font:\r\n${wscDiffs.fontName}`;
+    return;
+  }
+  if (hbs.getFontVersion() !== wscDiffs.fontVersion) {
+    divError.innerText = `Expecting version:\r\n${wscDiffs.fontVersion}`;
+    return;
+  }
+  divError.innerText = '';
+  //divLOAD.hidden = true;
+  divINST.hidden = true;
+  divMAIN.hidden = false;
+  gotoFirst();
+}
+
+async function handleDropWsc(fileObject) {
+  const file = fileObject.file;
+  const filename = fileObject.filename;
+  progressPanel.start(3, 'Parsing');
+  const wscText = await file.text();
+  progressPanel.setProgress(1);
+  const lines = textToLines(wscText);
+  progressPanel.setProgress(2);
+  wscDiffs = parseWsc(lines);
+  progressPanel.setProgress(3);
+  ddWscFileName.innerText = filename;
+  ddWscFileResult.innerHTML = `${wscDiffs.length} entries<br/>${wscDiffs.stats.fail} fail<br/>${wscDiffs.stats.good} good`;
+  fileObject.loaded = (wscDiffs.length > 0);
+  progressPanel.done();
+  headHarfBuzz.hidden = !wscDiffs.stats.shapers.has('hb');
+  headDirectWrite.hidden = !wscDiffs.stats.shapers.has('dw');
+  headUniscribe.hidden = !wscDiffs.stats.shapers.has('us');
+  decideButtonProcessEnable();
+}
+
+async function handleDropTTF(fileObject) {
+  const file = fileObject.file;
+  const filename = fileObject.filename;
+  const buff = await file.arrayBuffer();
+  hbs.setFontBlob(buff);
+  ddFontFileName.innerText = filename;
+  ddFontFileResult.innerHTML = `${hbs.getFontFullName()}<br/>${hbs.getFontVersion()}`;
+  fileObject.loaded = hbs.getFontFullName();
+  decideButtonProcessEnable();
+}
+
+async function handleDropFiles(file, event, files) {
+  for (let i=0; i<files.length; i++) {
+    file = files[i];
+    const filename = file.name.toLowerCase();
+    if (filename.endsWith('.wsc.txt')) {
+      wscFile = {file:file, filename:filename};
+      await handleDropWsc(wscFile);
+    }
+    else
+    if (filename.endsWith('.ttf')) {
+      fontFile = {file:file, filename:filename};
+      await handleDropTTF(fontFile);
+    }
+    else
+      window.alert(`File extension "${filename}" not known`);
+  }
+}
+
+function patchEvent(func, event, arr) {
+  arr.forEach(e=>e.addEventListener(event, func));
+}
+function patchEventInput(func, arr) {
+  patchEvent(func, 'input', arr);
+}
+function patchEventClick(func, arr) {
+  patchEvent(func, 'click', arr);
+}
+
+
+patchDragDrop(ddFiles, handleDropFiles);
+const ddFilesDT = new DoubleTapDetector(ddFiles, () => {
+  chooseFile(handleDropFiles, {multiple:true});
+});
+
+patchDragDrop(divWord, handleWordDropFiles);
+const divWordDT = new DoubleTapDetector(divWord, () => {
+  chooseFile(handleWordDropFiles, {multiple:false});
+});
+
+//patchEventClick(doProcess, [btnProcess]);
+patchEventClick(gotoFirst, [btnFirst]);
+patchEventClick(gotoPrev,  [btnPrev]);
+patchEventClick(gotoNext,  [btnNext]);
+patchEventClick(gotoLast,  [btnLast]);
+patchEventClick(gotoIndex, [btnGoIndex]);
+</script>
+
+<br/>
+2026-03-16 19:40
+</body>
+</html>
