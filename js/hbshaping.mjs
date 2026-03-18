@@ -143,6 +143,7 @@ class HarfBuzzShaping {
     this.blob = this.hb.createBlob(this.fontBlob);
     this.face = this.hb.createFace(this.blob, 0);
     this.font = this.hb.createFont(this.face);
+    this.font.setScale(1000,1000);
 
     this.otFont = opentype.parse(this.fontBlob);
     this.otLayout = new Layout(this.otFont, 'GPOS');

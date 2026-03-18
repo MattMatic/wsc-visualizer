@@ -361,7 +361,7 @@ function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
       const ge = glyphs[i];
       const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;
       if (!gr || (gr.g !== ge.g) || (gr.dx !== ge.dx) || (gr.dy !== ge.dy) || (gr.ax !== ge.ax)) {
-        svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.7;" d="M ${x} ${y} `;
+        svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.7;" d="M${x} ${y} `;
         const gj = hbs.glyphToRelativeJson(ge.g);
         svg += jsonToSvg(gj.json);
         svg += `"/>`;
@@ -392,7 +392,7 @@ function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
       if ((gr.dx !== ge.dx) || (gr.dy !== ge.dy) || (gr.ax !== ge.ax))
         color = '#28c';
     }
-    svg += `<path style="fill:${color};fill-opacity:1;" d="M ${x+ge.dx} ${y-ge.dy} `;
+    svg += `<path style="fill:${color};fill-opacity:1;" d="M${x} ${y} m${ge.dx} ${-ge.dy} `;
     const gj = hbs.glyphToRelativeJson(ge.g);
     svg += jsonToSvg(gj.json);
     svg += `"/>`;
@@ -606,6 +606,6 @@ patchEventClick(gotoIndex, [btnGoIndex]);
 </script>
 
 <br/>
-2026-03-16 19:40
+2026-03-17 17:35
 </body>
 </html>
