@@ -116,23 +116,29 @@ async function onResourcesLoaded() {
     <td><button id='btnNext'  accesskey='3'>Next (Alt-3)</button></td>
     <td><button id='btnLast'  accesskey='4'>Last (Alt-4)</button></td>
   </tr>
+  <tr>
+    <td><input type='checkbox' id='cbGlyphColors'><label for='cbGlyphColors'>Color</label></input></td>
+    <td><input type='checkbox' id='cbHighlight'><label for='cbHighlight'>Highlight</label></input></td>
+    <td><input type='checkbox' id='cbBaseline' checked><label for='cbBaseline'>Baseline</label></input></td>
 </table>
 <table width='100%' border='1'>
   <tr>
     <td width='33%'>
       <h2 id='headHarfBuzz'>HarfBuzz</h2>
       <div id='svgHarfBuzz'></div>
-      <script>insertSvgZoomControls('svgHarfBuzz');</script>
     </td>
     <td width='33%'>
       <h2 id='headDirectWrite'>DirectWrite</h2>
       <div id='svgDirectWrite'></div>
-      <script>insertSvgZoomControls('svgDirectWrite');</script>
     </td>
     <td width='33%'>
       <h2 id='headUniscribe'>Uniscribe</h2>
       <div id='svgUniscribe'></div>
-      <script>insertSvgZoomControls('svgUniscribe');</script>
+    </td>
+  </tr>
+  <tr>
+    <td colspan=3>
+      <script>insertSvgZoomGroupControls([svgHarfBuzz, svgDirectWrite, svgUniscribe]);</script>
     </td>
   </tr>
   <tr>
@@ -220,6 +226,7 @@ function parseWsc(lines) {
     if (comment) {
       if (comment[1] == 'FONTFILE') res.fontFile = comment[2]; else
       if (comment[1] == 'FONTNAME') res.fontName = comment[2]; else
+      if (comment[1] == 'TOLERANCE') res.tolerance = comment[2]; else
       if (comment[1] == 'FONTVERS') res.fontVersion = comment[2]; else
       if (comment[1] == 'WORDFILE') res.wordFile = comment[2];
 
@@ -262,6 +269,7 @@ let wscDiffs;
 let currentIndex = 0;
 let currentDiff;
 let fontFile;
+let tolerance = 2;
 
 /*--
 async function loadLists() {
@@ -343,59 +351,124 @@ function wrapSvg(svg, dimensions={}) {
   //return `<svg main="http://www.w3.org/2000/svg" height="${heightOut}" viewBox="${xmin} ${ymin} ${width} ${height}">${svg}</svg>`;
 }
 
+function getGlyphColor(index) {
+  const glyphColors = ['#bb87e3','#bc6b0e','#57118c','#64902e','#91bbec','#d65e02','#1d5799','#984c11','#271909'];
+  const max = glyphColors.length;
+  return glyphColors[index % max];
+}
+
+function glyphDifferent(ge1, ge2) {
+  if (!ge1 || !ge2) return false;
+  return (ge1.g != ge2.g);
+}
+
+function tol(v1, v2) { return (Math.abs(v1 - v2) > tolerance); }
+
+function glyphPosDifferent(ge1, ge2) {
+  if (!ge1 || !ge2) return false;
+  return  tol(ge1.dx, ge2.dx) || tol(ge1.dy, ge2.dy);
+}
+
+function glyphAdvDifferent(ge1, ge2) {
+  if (!ge1 || !ge2) return false;
+  return tol(ge1.ax, ge2.ax);
+}
 
 function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
+  function spanTxt(txt) {
+    return `<span class='gdIndex'>${txt}</span>`;
+  }
+
   const glyphs = glyphTextToArray(glyphData.g);
-  const glyphsRef = (ref && glyphData.fail) ? glyphTextToArray(ref.g) : undefined;
+  const glyphsRef = (ref /*&& glyphData.fail*/) ? glyphTextToArray(ref.g) : undefined;
   let svg = '';
-  let gtxt = '';
+  let gtxt = '<em>'+spanTxt('idx')+spanTxt('gid')+spanTxt('dX')+spanTxt('dY')+spanTxt('adv')+'</em><br/>';
   let x = 0;
   let y = 0;
 
   // Do the 'difference' highlight first
   if (glyphData.fail) {
     eleGlyphs.style.backgroundColor = '#fcc';
-    /*
+
     const glyphsRef = glyphTextToArray(ref.g);
-    for (let i=0; i<glyphs.length; i++) {
-      const ge = glyphs[i];
-      const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;
-      if (!gr || (gr.g !== ge.g) || (gr.dx !== ge.dx) || (gr.dy !== ge.dy) || (gr.ax !== ge.ax)) {
-        svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.7;" d="M${x} ${y} `;
-        const gj = hbs.glyphToRelativeJson(ge.g);
-        svg += jsonToSvg(gj.json);
-        svg += `"/>`;
-      }
-      x += ge.ax;
+    if (cbHighlight.checked) {
+      for (let i=0; i<glyphs.length; i++) {
+        const ge = glyphs[i];
+        const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;      
+        if (
+            !gr || 
+            glyphDifferent(gr, ge) || 
+            glyphPosDifferent(gr, ge) ||
+            glyphAdvDifferent(gr, ge)
+           )
+        {
+          svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.4;" d="M${x} ${y} m${ge.dx} ${-ge.dy} `;
+          const gj = hbs.glyphToRelativeJson(ge.g);
+          svg += jsonToSvg(gj.json);
+          svg += `"/>`;
+        }
+        x += ge.ax;
+      }      
     }
-    */
   } else {
     eleGlyphs.style.backgroundColor = '';
   }
 
   x = 0;
   y = 0;
+  let width = 0;
+  for (let i=0; i<glyphs.length; i++) {
+    const ge=glyphs[i];
+    width += ge.ax;
+  }
+
+  if (cbBaseline.checked) {
+    const baselineWidth = 11;
+    svg += 
+      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M-300 0 L16000 ${y}"></path>`+
+      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M0 -1500 L0 3000"></path>`+
+      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M${width} -1500 L${width} 3000"></path>`+
+      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M${x} -1500 L${x} ${y+3000}"></path>`;
+  }
+
   for (let i=0; i<glyphs.length; i++) {
     const ge = glyphs[i];
-    gtxt += `<span class='gdIndex'>#${i+1}</span> `+
-        `<span class='gdIndex'>${ge.g}</span> `+
-        `<span class='gdIndex'>${ge.dx}</span> `+
-        `<span class='gdIndex'>${ge.dy}</span> `+
-        `<span class=gdIndex''>${ge.ax}</span><br/>\r\n`;
-
+    const gr = glyphsRef && (i < glyphsRef.length) ? glyphsRef[i] : undefined;
     let color = 'black';
-    if (glyphsRef) {
-      const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;
-      if (!gr || (gr.g !== ge.g)) {
-        color = '#e22';
-      } else
-      if ((gr.dx !== ge.dx) || (gr.dy !== ge.dy) || (gr.ax !== ge.ax))
-        color = '#28c';
+    const gidDiff = glyphDifferent(gr, ge);
+    const posDiff = glyphPosDifferent(gr, ge);
+    const advDiff = glyphAdvDifferent(gr, ge);
+
+    if (!cbHighlight.checked) {      
+      if (glyphsRef) {
+        if (gidDiff) {
+          color = '#e22';
+        } else
+        if (posDiff)
+          color = '#28c';
+        else
+        if (advDiff)
+          color = '#c2c';
+      }
     }
+    function styleDiff(txt, bv) {
+      if (!bv) return txt;
+      return `<font color='red'><b>${txt}</b></font>`;
+    }
+    gtxt += spanTxt(i+1)+
+        spanTxt(styleDiff(ge.g, gidDiff))+
+        spanTxt(styleDiff(ge.dx, posDiff))+
+        spanTxt(styleDiff(ge.dy, posDiff))+
+        spanTxt(styleDiff(ge.ax, advDiff))+
+        `<br/>\r\n`;
+
+    if (cbGlyphColors.checked)
+      color = getGlyphColor(i);
     svg += `<path style="fill:${color};fill-opacity:1;" d="M${x} ${y} m${ge.dx} ${-ge.dy} `;
     const gj = hbs.glyphToRelativeJson(ge.g);
     svg += jsonToSvg(gj.json);
     svg += `"/>`;
+
     x += ge.ax;
   }
 
@@ -409,7 +482,8 @@ function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
     widthOut: 400,
     element: eleSvg,
   });
-  updateSvg(eleSvg, svg);
+  const svgDivSet = [svgHarfBuzz, svgDirectWrite, svgUniscribe];
+  updateSvg(eleSvg, svg, svgDivSet);
 }
 
 function showRenderingAll(entry) {
@@ -520,6 +594,7 @@ function decideButtonProcessEnable() {
     divError.innerText = `Expecting version:\r\n${wscDiffs.fontVersion}`;
     return;
   }
+  tolerance = Number(wscDiffs?.tolerance | 2);
   divError.innerText = '';
   //divLOAD.hidden = true;
   divINST.hidden = true;
@@ -576,6 +651,10 @@ async function handleDropFiles(file, event, files) {
   }
 }
 
+function updateCheckboxes() {
+  showRenderingAll(currentDiff);
+}
+
 function patchEvent(func, event, arr) {
   arr.forEach(e=>e.addEventListener(event, func));
 }
@@ -603,9 +682,10 @@ patchEventClick(gotoPrev,  [btnPrev]);
 patchEventClick(gotoNext,  [btnNext]);
 patchEventClick(gotoLast,  [btnLast]);
 patchEventClick(gotoIndex, [btnGoIndex]);
+patchEventInput(updateCheckboxes, [cbGlyphColors, cbHighlight, cbBaseline]);
 </script>
 
 <br/>
-2026-03-17 17:35
+2026-03-19 14:40
 </body>
 </html>

@@ -11,7 +11,7 @@ function DownloadSvg(fileName) {
   URL.revokeObjectURL(tempLink.href);
 }
 
-function updateSvg(dive, html) {
+function updateSvg(dive, html, divSet) {
   var oldScale = 1;
   var oldTranslate = {x:0, y:0};
 
@@ -21,11 +21,11 @@ function updateSvg(dive, html) {
     oldTranslate = svge.currentTranslate;
   }
   dive.innerHTML = html;
-  svge = dive.children[0];
+  svge = dive.children[0]; // (!) Updated by the above assignment
   svge.currentScale = oldScale;
   svge.currentTranslate.x = oldTranslate.x;
   svge.currentTranslate.y = oldTranslate.y;
-  addSVGZoomAndPan(dive.children[0]);
+  addSVGZoomAndPan(svge, divSet);
 }
 
 function adjustSVGzoom(svge, amount) {
@@ -42,57 +42,90 @@ function adjustSVGzoom(svge, amount) {
   svge.currentTranslate.x+=0;
 }
 
-function zoomSVG(svgE, amount) {
-  const svge = svgE.children[0];
-  adjustSVGzoom(svge, amount);
-  if (amount==0) {
-    svge.currentTranslate.y = 0;
-    svge.currentTranslate.x = 0;
+function zoomSVG(svgE, amount, divSet) {
+  const svgA = [svgE?.children[0]];
+  if (divSet) {
+    svgA.length = 0;
+    divSet.forEach(divi=>{
+      const svgi = divi?.children[0];
+      if (svgi) svgA.push(svgi);
+    });
   }
+  svgA.forEach(svgi=> {
+    adjustSVGzoom(svgi, amount);
+    if (amount==0) {
+      svgi.currentTranslate.y = 0;
+      svgi.currentTranslate.x = 0;
+    }
+  });
 }
 
-function addSVGZoomAndPan(svg){
+function addSVGZoomAndPan(svg, divSet){
   // From https://github.com/Holger-Will/SVGZoomAndPan/blob/master/zap.js
   svg.addEventListener("wheel",function(evt){
+    const svgA = [svg];
+    if (divSet) {
+      svgA.length = 0;
+      for (let i=0; i<divSet.length; i++) {
+        const svgi = divSet[i]?.children[0];
+        if (svgi) svgA.push(svgi);
+      }
+    }
     if (evt.shiftKey) {
-      // Only zoom while the shift key is pressed (to allow scrolling the page)
+      // Only zoom while the shift key is pressed (to allow scrolling the page)      
       var newScale
       if(evt.deltaY>0){newScale=svg.currentScale/1.1}
       if(evt.deltaY<0){newScale=svg.currentScale*1.1}
       var oldScale=svg.currentScale
-       svg.currentTranslate.x=(-evt.offsetX+svg.currentTranslate.x)*(newScale/oldScale)
-       svg.currentTranslate.y=(-evt.offsetY+svg.currentTranslate.y)*(newScale/oldScale)
-       svg.currentScale=newScale
-       svg.currentTranslate.x+=evt.offsetX
-       svg.currentTranslate.y+=evt.offsetY
-       var event = new Event('SVGZoom');
-       svg.dispatchEvent(event);
-       evt.preventDefault();  // Stop window from scrolling (update to zap.js)
-     }
+      svgA.forEach(svgi=> {
+        svgi.currentTranslate.x=(-evt.offsetX+svg.currentTranslate.x)*(newScale/oldScale)
+        svgi.currentTranslate.y=(-evt.offsetY+svg.currentTranslate.y)*(newScale/oldScale)
+        svgi.currentScale=newScale
+        svgi.currentTranslate.x+=evt.offsetX
+        svgi.currentTranslate.y+=evt.offsetY
+        var event = new Event('SVGZoom');
+        svgi.dispatchEvent(event);
+      });
+      evt.preventDefault();  // Stop window from scrolling (update to zap.js)
+    }
   } /*, {passive:true}*/)
   svg.addEventListener("mousedown",function(evt){
+    const svgA = [svg];
+    if (divSet) {
+      svgA.length = 0;
+      for (let i=0; i<divSet.length; i++) {
+        const svgi = divSet[i]?.children[0];
+        if (svgi) svgA.push(svgi);
+      }
+    }
     if(!evt.shiftKey || evt.button==1){
       svg.classList.add("dragging")
       var ox=evt.offsetX
       var oy=evt.offsetY
       var otx=svg.currentTranslate.x
       var oty=svg.currentTranslate.y
-      svg.addEventListener("mousemove",move)
-      document.addEventListener("mouseup",out)
-      var event = new Event('SVGScroll');
-      svg.dispatchEvent(event)
-      function out(evt){
-        svg.removeEventListener("mousemove",move)
-        document.removeEventListener("mouseup",out)
-        svg.classList.remove("dragging")
+      svgA.forEach(svgi => {
+        svgi.addEventListener("mousemove",move)
+        document.addEventListener("mouseup",out)
         var event = new Event('SVGScroll');
-        svg.dispatchEvent(event)
+        svgi.dispatchEvent(event)
+      });
+      function out(evt){
+        svgA.forEach(svgi => {
+          svgi.removeEventListener("mousemove",move)
+          document.removeEventListener("mouseup",out)
+          svgi.classList.remove("dragging")
+          var event = new Event('SVGScroll');
+          svgi.dispatchEvent(event)
+        });
       }
       function move(evt){
-        svg.currentTranslate.x=otx+(evt.offsetX-ox)
-        svg.currentTranslate.y=oty+(evt.offsetY-oy)
-        var event = new Event('SVGScroll');
-        svg.dispatchEvent(event)
+        svgA.forEach(svgi => {
+          svgi.currentTranslate.x=otx+(evt.offsetX-ox)
+          svgi.currentTranslate.y=oty+(evt.offsetY-oy)
+          var event = new Event('SVGScroll');
+          svgi.dispatchEvent(event)
+        });
       }
     }
   })
@@ -113,3 +146,17 @@ function insertSvgZoomControls(svgID, downloadEnable) {
   </p>
   `);
 }
+
+function insertSvgZoomGroupControls(divSet) {
+  document.write(`<p>
+  <button style="font-size:65%;" id="zoomOutSVG">-</button>
+  <button style="font-size:65%;" id="zoomResetSVG" title="Middle click or Shift-Left and drag to pan the SVG">100%</button>
+  <button style="font-size:65%;" id="zoomInSVG">+</button>
+  <font style="font-size:65%;">&nbsp; Shift-Scroll to zoom. Left-Mouse to drag.</font>
+  </p>
+  `);
+  zoomOutSVG.addEventListener('click', evt=>{zoomSVG(null, -1, divSet);});
+  zoomResetSVG.addEventListener('click', evt=>{zoomSVG(null, 0, divSet);});
+  zoomInSVG.addEventListener('click', evt=>{zoomSVG(null, 1, divSet);});
+}
+
