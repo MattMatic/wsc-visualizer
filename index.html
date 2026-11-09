@@ -16,7 +16,7 @@ table,th,td {
   font-size: 200%;
   font-family: "TEST_FONT";
 }
-#glyphsHarfBuzz,#glyphsDirectWrite,#glyphsUniscribe {
+#glyphsHarfBuzz,#glyphsDirectWrite,#glyphsUniscribe,#glyphsCoreText {
   font-family: 'Consolas',monospace;
   font-size: 70%;
 }
@@ -123,28 +123,33 @@ async function onResourcesLoaded() {
 </table>
 <table width='100%' border='1'>
   <tr>
-    <td width='33%'>
+    <td>
       <h2 id='headHarfBuzz'>HarfBuzz</h2>
       <div id='svgHarfBuzz'></div>
     </td>
-    <td width='33%'>
+    <td id='tdDirectWrite'>
       <h2 id='headDirectWrite'>DirectWrite</h2>
       <div id='svgDirectWrite'></div>
     </td>
-    <td width='33%'>
+    <td id='tdUniscribe'>
       <h2 id='headUniscribe'>Uniscribe</h2>
       <div id='svgUniscribe'></div>
     </td>
+    <td id='tdCoreText' hidden>
+      <h2 id='headCoreText'>Core Text</h2>
+      <div id='svgCoreText'></div>
+    </td>
   </tr>
   <tr>
-    <td colspan=3>
-      <script>insertSvgZoomGroupControls([svgHarfBuzz, svgDirectWrite, svgUniscribe]);</script>
+    <td colspan=4>
+      <script>insertSvgZoomGroupControls([svgHarfBuzz, svgDirectWrite, svgUniscribe, svgCoreText]);</script>
     </td>
   </tr>
   <tr>
     <td><div id='glyphsHarfBuzz'></div>
-    <td><div id='glyphsDirectWrite'></div>
-    <td><div id='glyphsUniscribe'></div>
+    <td id='tdGlyphsDirectWrite'><div id='glyphsDirectWrite'></div>
+    <td id='tdGlyphsUniscribe'><div id='glyphsUniscribe'></div>
+    <td id='tdGlyphsCoreText' hidden><div id='glyphsCoreText'></div>
   </tr>
 </table>
 </div>
@@ -167,7 +172,7 @@ async function loadFileUrl(url) {
 function readFileAsText(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onloader = () => resolve(reader.result); // Resolve with content
+    reader.onload = () => resolve(reader.result); // Resolve with content
     reader.onerror  = () => reject(reader.error);   // Reject on error
     reader.readAsText(file); // Start reading
   });
@@ -176,7 +181,7 @@ function readFileAsText(file) {
 function readFileAsArrayBuffer(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onloader = () => resolve(reader.result); // Resolve with content
+    reader.onload = () => resolve(reader.result); // Resolve with content
     reader.onerror  = () => reject(reader.error);   // Reject on error
     reader.readAsArrayBuffer(file); // Start reading
   });
@@ -212,6 +217,98 @@ function glyphTextToArray(glyphText) {
   return glyphs;
 }
 
+
+/*
+ * Nominal (hmtx) advance of a glyph, scaled to the 1000 unit space of the wsc data.
+ */
+const nominalCache = new Map();
+function nominalAdv(gid) {
+  let v = nominalCache.get(gid);
+  if (v === undefined) {
+    const otf = hbs.otFont;
+    const g = otf?.glyphs?.get(gid);
+    v = g ? Math.round(g.advanceWidth * 1000 / otf.unitsPerEm) : 0;
+    nominalCache.set(gid, v);
+  }
+  return v;
+}
+
+function isBlankGlyph(gid) {
+  const ext = hbs.glyphToRelativeJson(gid).ext;
+  return (ext.w === 0) && (ext.h === 0);
+}
+
+/* Is this engine's output in DirectWrite's RTL convention (see drawnGlyphs)? */
+function useDrawn(key) {
+  return !!wscDiffs?.drawn && (key === 'dw' || key === 'dn');
+}
+
+/*
+ * Where each glyph is actually drawn (visual order, left to right) and the total width.
+ *
+ * HarfBuzz / LTR:  x = pen + dx
+ * DirectWrite RTL: x = pen + dx + (advance - nominalAdvance)
+ *   DirectWrite puts the glyph at the right-hand end of its advance box, and folds a cursive
+ *   join into the NEXT glyph's advance with an opposite dx. HarfBuzz folds it into the exit
+ *   glyph. The raw fields therefore always differ for joined glyphs even when the pictures
+ *   are identical. Same rule as ShapingCompare >= 1.2.0.
+ */
+function drawnGlyphs(glyphs, directWriteRtl) {
+  let pen = 0;
+  const xs = [];
+  for (let i=0; i<glyphs.length; i++) {
+    const g = glyphs[i];
+    xs.push(pen + g.dx + (directWriteRtl ? g.ax - nominalAdv(g.g) : 0));
+    pen += g.ax;
+  }
+  return { xs: xs, total: pen };
+}
+
+/* Same decision as ShapingCompare's runsDiffer(), for wsc files written by an older tool. */
+function glyphsDiffer(ref, glyphs, key) {
+  if (ref.length !== glyphs.length) return true;
+  for (let i=0; i<ref.length; i++) if (ref[i].g !== glyphs[i].g) return true;
+  if (useDrawn(key)) {
+    const a = drawnGlyphs(ref, false);
+    const b = drawnGlyphs(glyphs, true);
+    if (tol(a.total, b.total)) return true;
+    for (let i=0; i<ref.length; i++) {
+      if (isBlankGlyph(ref[i].g)) continue;
+      if (tol(a.xs[i], b.xs[i]) || tol(ref[i].dy, glyphs[i].dy)) return true;
+    }
+  } else {
+    for (let i=0; i<ref.length; i++) {
+      if (tol(ref[i].ax, glyphs[i].ax)) return true;
+      if (isBlankGlyph(ref[i].g)) continue;
+      if (tol(ref[i].dx, glyphs[i].dx) || tol(ref[i].dy, glyphs[i].dy)) return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Files from ShapingCompare < 1.2.0 mark every cursive RTL word as different (raw field compare).
+ * For those, redo the comparison here. Files with a COMPARE header keep the tool's own markers.
+ */
+function recomputeFails() {
+  if (!wscDiffs || !hbs.otFont || wscDiffs.compare) return;
+  let fail = 0, good = 0;
+  for (let i=0; i<wscDiffs.length; i++) {
+    const e = wscDiffs[i];
+    if (e.hb) {
+      const ref = glyphTextToArray(e.hb.g);
+      for (const k of ['dw', 'dn', 'us']) {
+        if (e[k]) e[k].fail = glyphsDiffer(ref, glyphTextToArray(e[k].g), k);
+      }
+    }
+    if (e.dw?.fail || e.dn?.fail || e.us?.fail || e.ct?.fail) fail++; else good++;
+  }
+  wscDiffs.stats.fail = fail;
+  wscDiffs.stats.good = good;
+  wscDiffs.stats.total = fail + good;
+  ddWscFileResult.innerHTML = `${wscDiffs.length} entries<br/>${fail} fail<br/>${good} good`;
+}
+
 function parseWsc(lines) {
   const res = [];
   let word = '';
@@ -228,7 +325,10 @@ function parseWsc(lines) {
       if (comment[1] == 'FONTNAME') res.fontName = comment[2]; else
       if (comment[1] == 'TOLERANCE') res.tolerance = comment[2]; else
       if (comment[1] == 'FONTVERS') res.fontVersion = comment[2]; else
-      if (comment[1] == 'WORDFILE') res.wordFile = comment[2];
+      if (comment[1] == 'WORDFILE') res.wordFile = comment[2]; else
+      if (comment[1] == 'RTL') res.rtl = (comment[2].trim() === 'yes'); else
+      if (comment[1] == 'COMPARE') res.compare = comment[2].trim(); else
+      if (comment[1] == 'TOOL') res.tool = comment[2].trim();
 
     }
     const m = line.match(/^([^\s]?[^#\s]+)/u);  // Extract a word at the beginning - up to a space or hash
@@ -247,9 +347,12 @@ function parseWsc(lines) {
       if (failed) entry[r[1]].fail=true;
     }
   }
+  // 'drawn': DirectWrite RTL runs are compared/rendered by drawn glyph position (see drawnGlyphs).
+  // ShapingCompare >= 1.2.0 states which it used; older files predate it, so assume drawn for RTL.
+  res.drawn = res.compare ? res.compare.startsWith('drawn') : !!res.rtl;
   for (let i=0; i<res.length; i++) {
     const e = res[i];
-    if (e?.hb?.fail || e?.dw?.fail || e?.us?.fail)
+    if (e?.hb?.fail || e?.dw?.fail || e?.dn?.fail || e?.us?.fail || e?.ct?.fail)
       countFail++;
     else
       countGood++;
@@ -357,121 +460,95 @@ function getGlyphColor(index) {
   return glyphColors[index % max];
 }
 
-function glyphDifferent(ge1, ge2) {
-  if (!ge1 || !ge2) return false;
-  return (ge1.g != ge2.g);
-}
-
 function tol(v1, v2) { return (Math.abs(v1 - v2) > tolerance); }
 
-function glyphPosDifferent(ge1, ge2) {
-  if (!ge1 || !ge2) return false;
-  return  tol(ge1.dx, ge2.dx) || tol(ge1.dy, ge2.dy);
-}
-
-function glyphAdvDifferent(ge1, ge2) {
-  if (!ge1 || !ge2) return false;
-  return tol(ge1.ax, ge2.ax);
-}
-
-function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
+function showRendering(eleSvg, eleGlyphs, glyphData, ref, key) {
   function spanTxt(txt) {
     return `<span class='gdIndex'>${txt}</span>`;
   }
 
   const glyphs = glyphTextToArray(glyphData.g);
-  const glyphsRef = (ref /*&& glyphData.fail*/) ? glyphTextToArray(ref.g) : undefined;
+  const glyphsRef = ref ? glyphTextToArray(ref.g) : undefined;
+  const dwRtl = useDrawn(key);
+  // Core Text (ct): drawn x = pen + dx (no DirectWrite nominal-advance shift) but, like DirectWrite, it folds offsets into advances differently
+  // from HarfBuzz, so it is compared by drawn position, not by the raw dx / advance fields.
+  const cmpDrawn = dwRtl || key === 'ct';
+  const dr = drawnGlyphs(glyphs, dwRtl);
+  const drRef = glyphsRef ? drawnGlyphs(glyphsRef, useDrawn(ref === glyphData ? key : 'hb')) : undefined;
+
+  // Per-glyph differences against the reference, in the same terms as the pass/fail decision
+  const diffs = glyphs.map((ge, i) => {
+    const gr = (glyphsRef && i < glyphsRef.length) ? glyphsRef[i] : undefined;
+    if (!gr || ref === glyphData) return {};
+    const gid = (gr.g !== ge.g);
+    const blank = !gid && isBlankGlyph(ge.g);
+    const pos = !gid && !blank && (cmpDrawn
+                  ? (tol(drRef.xs[i], dr.xs[i]) || tol(gr.dy, ge.dy))
+                  : (tol(gr.dx, ge.dx) || tol(gr.dy, ge.dy)));
+    const adv = !gid && !cmpDrawn && tol(gr.ax, ge.ax);
+    return { any: gid || pos || adv, gid: gid, pos: pos, adv: adv };
+  });
+
   let svg = '';
-  let gtxt = '<em>'+spanTxt('idx')+spanTxt('gid')+spanTxt('dX')+spanTxt('dY')+spanTxt('adv')+'</em><br/>';
-  let x = 0;
-  let y = 0;
+  let gtxt = '<em>'+spanTxt('idx')+spanTxt('gid')+spanTxt('dX')+spanTxt('dY')+spanTxt('adv')+spanTxt('x')+'</em><br/>';
+  const y = 0;
 
   // Do the 'difference' highlight first
-  if (glyphData.fail) {
+  if (glyphData.fail && ref) {
     eleGlyphs.style.backgroundColor = '#fcc';
-
-    const glyphsRef = glyphTextToArray(ref.g);
     if (cbHighlight.checked) {
       for (let i=0; i<glyphs.length; i++) {
         const ge = glyphs[i];
-        const gr = (i < glyphsRef.length) ? glyphsRef[i] : undefined;      
-        if (
-            !gr || 
-            glyphDifferent(gr, ge) || 
-            glyphPosDifferent(gr, ge) ||
-            glyphAdvDifferent(gr, ge)
-           )
-        {
-          svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.4;" d="M${x} ${y} m${ge.dx} ${-ge.dy} `;
-          const gj = hbs.glyphToRelativeJson(ge.g);
-          svg += jsonToSvg(gj.json);
+        if (diffs[i].any || i >= glyphsRef.length) {
+          svg += `<path style="stroke:#faa;stroke-width:150;stroke-opacity:0.4;" d="M${dr.xs[i]} ${y} m0 ${-ge.dy} `;
+          svg += jsonToSvg(hbs.glyphToRelativeJson(ge.g).json);
           svg += `"/>`;
         }
-        x += ge.ax;
-      }      
+      }
     }
   } else {
     eleGlyphs.style.backgroundColor = '';
   }
 
-  x = 0;
-  y = 0;
-  let width = 0;
-  for (let i=0; i<glyphs.length; i++) {
-    const ge=glyphs[i];
-    width += ge.ax;
-  }
-
+  const width = dr.total;
   if (cbBaseline.checked) {
     const baselineWidth = 11;
     svg += 
       `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M-300 0 L16000 ${y}"></path>`+
       `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M0 -1500 L0 3000"></path>`+
-      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M${width} -1500 L${width} 3000"></path>`+
-      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M${x} -1500 L${x} ${y+3000}"></path>`;
+      `<path style="stroke:#ff4040;stroke-opacity:0.5;stroke-width:${baselineWidth}" d="M${width} -1500 L${width} 3000"></path>`;
   }
 
   for (let i=0; i<glyphs.length; i++) {
     const ge = glyphs[i];
-    const gr = glyphsRef && (i < glyphsRef.length) ? glyphsRef[i] : undefined;
+    const d = diffs[i];
     let color = 'black';
-    const gidDiff = glyphDifferent(gr, ge);
-    const posDiff = glyphPosDifferent(gr, ge);
-    const advDiff = glyphAdvDifferent(gr, ge);
 
-    if (!cbHighlight.checked) {      
-      if (glyphsRef) {
-        if (gidDiff) {
-          color = '#e22';
-        } else
-        if (posDiff)
-          color = '#28c';
-        else
-        if (advDiff)
-          color = '#c2c';
-      }
+    if (!cbHighlight.checked) {
+      if (d.gid) color = '#e22'; else
+      if (d.pos) color = '#28c'; else
+      if (d.adv) color = '#c2c';
     }
     function styleDiff(txt, bv) {
       if (!bv) return txt;
       return `<font color='red'><b>${txt}</b></font>`;
     }
     gtxt += spanTxt(i+1)+
-        spanTxt(styleDiff(ge.g, gidDiff))+
-        spanTxt(styleDiff(ge.dx, posDiff))+
-        spanTxt(styleDiff(ge.dy, posDiff))+
-        spanTxt(styleDiff(ge.ax, advDiff))+
+        spanTxt(styleDiff(ge.g, d.gid))+
+        spanTxt(styleDiff(ge.dx, d.pos && !cmpDrawn))+
+        spanTxt(styleDiff(ge.dy, d.pos))+
+        spanTxt(styleDiff(ge.ax, d.adv))+
+        spanTxt(styleDiff(dr.xs[i], d.pos && cmpDrawn))+
         `<br/>\r\n`;
 
     if (cbGlyphColors.checked)
       color = getGlyphColor(i);
-    svg += `<path style="fill:${color};fill-opacity:1;" d="M${x} ${y} m${ge.dx} ${-ge.dy} `;
-    const gj = hbs.glyphToRelativeJson(ge.g);
-    svg += jsonToSvg(gj.json);
+    svg += `<path style="fill:${color};fill-opacity:1;" d="M${dr.xs[i]} ${y} m0 ${-ge.dy} `;
+    svg += jsonToSvg(hbs.glyphToRelativeJson(ge.g).json);
     svg += `"/>`;
-
-    x += ge.ax;
   }
 
+  gtxt += `<em>width ${width}</em>`;
   eleGlyphs.innerHTML = gtxt;
 
   svg = wrapSvg(svg, {
@@ -482,15 +559,17 @@ function showRendering(eleSvg, eleGlyphs, glyphData, ref) {
     widthOut: 400,
     element: eleSvg,
   });
-  const svgDivSet = [svgHarfBuzz, svgDirectWrite, svgUniscribe];
+  const svgDivSet = [svgHarfBuzz, svgDirectWrite, svgUniscribe, svgCoreText];
   updateSvg(eleSvg, svg, svgDivSet);
 }
 
 function showRenderingAll(entry) {
-  const ref = entry.hb ? entry.hb : entry.dw;
-  if (entry.hb) showRendering(svgHarfBuzz,    glyphsHarfBuzz,    entry.hb);
-  if (entry.dw) showRendering(svgDirectWrite, glyphsDirectWrite, entry.dw, ref);
-  if (entry.us) showRendering(svgUniscribe,   glyphsUniscribe,   entry.us, ref);
+  const ref = entry.hb ? entry.hb : (entry.dw ? entry.dw : (entry.dn ? entry.dn : entry.ct));
+  const dwKey = entry.dw ? 'dw' : (entry.dn ? 'dn' : null);
+  if (entry.hb) showRendering(svgHarfBuzz,    glyphsHarfBuzz,    entry.hb, entry.hb, 'hb');
+  if (dwKey)    showRendering(svgDirectWrite, glyphsDirectWrite, entry[dwKey], ref, dwKey);
+  if (entry.us) showRendering(svgUniscribe,   glyphsUniscribe,   entry.us, ref, 'us');
+  if (entry.ct) showRendering(svgCoreText,    glyphsCoreText,    entry.ct, ref, 'ct');
 }
 
 function showIndex(index) {
@@ -503,7 +582,7 @@ function showIndex(index) {
 }
 
 function isFail(index) {
-  return wscDiffs[index]?.dw?.fail || wscDiffs[index]?.us?.fail;
+  return wscDiffs[index]?.dw?.fail || wscDiffs[index]?.dn?.fail || wscDiffs[index]?.us?.fail || wscDiffs[index]?.ct?.fail;
 }
 
 function gotoWhich(forwards, firstLast) {
@@ -594,8 +673,15 @@ function decideButtonProcessEnable() {
     divError.innerText = `Expecting version:\r\n${wscDiffs.fontVersion}`;
     return;
   }
-  tolerance = Number(wscDiffs?.tolerance | 2);
+  if (wscDiffs.tool && /^cmpct\.py \(/.test(wscDiffs.tool)) {
+    divError.innerText = 'This file was made by cmpct.py 1.0, which reversed the HarfBuzz glyph order (wrong comparison).\r\nRe-run cmpct.py 1.1 or later.';
+    return;
+  }
+  tolerance = Number(wscDiffs?.tolerance) || 2;
   divError.innerText = '';
+  recomputeFails();
+  headDirectWrite.innerText = 'DirectWrite' + (wscDiffs.drawn ? ' (RTL: drawn positions)' : '');
+  headCoreText.innerText = 'Core Text (Safari/WebKit; drawn positions)';
   //divLOAD.hidden = true;
   divINST.hidden = true;
   divMAIN.hidden = false;
@@ -617,8 +703,12 @@ async function handleDropWsc(fileObject) {
   fileObject.loaded = (wscDiffs.length > 0);
   progressPanel.done();
   headHarfBuzz.hidden = !wscDiffs.stats.shapers.has('hb');
-  headDirectWrite.hidden = !wscDiffs.stats.shapers.has('dw');
-  headUniscribe.hidden = !wscDiffs.stats.shapers.has('us');
+  const sh = wscDiffs.stats.shapers;
+  // Show only the columns the file contains (native DirectWrite 'dn' also uses the DirectWrite column)
+  const hasDW = sh.has('dw') || sh.has('dn'), hasUS = sh.has('us'), hasCT = sh.has('ct');
+  headDirectWrite.hidden = !hasDW; tdDirectWrite.hidden = !hasDW; tdGlyphsDirectWrite.hidden = !hasDW;
+  headUniscribe.hidden = !hasUS;   tdUniscribe.hidden = !hasUS;   tdGlyphsUniscribe.hidden = !hasUS;
+  headCoreText.hidden = !hasCT;    tdCoreText.hidden = !hasCT;    tdGlyphsCoreText.hidden = !hasCT;
   decideButtonProcessEnable();
 }
 
@@ -626,6 +716,7 @@ async function handleDropTTF(fileObject) {
   const file = fileObject.file;
   const filename = fileObject.filename;
   const buff = await file.arrayBuffer();
+  nominalCache.clear();
   hbs.setFontBlob(buff);
   ddFontFileName.innerText = filename;
   ddFontFileResult.innerHTML = `${hbs.getFontFullName()}<br/>${hbs.getFontVersion()}`;
@@ -686,6 +777,6 @@ patchEventInput(updateCheckboxes, [cbGlyphColors, cbHighlight, cbBaseline]);
 </script>
 
 <br/>
-2026-03-19 14:40
+2026-11-06 09:10
 </body>
 </html>
