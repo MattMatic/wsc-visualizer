@@ -1,6 +1,7 @@
 <html>
 
 <head>
+<title>Shaping Compare Visualizer</title>
 <style>
 body {
   font-family: "Calibri", "Optima";
@@ -36,7 +37,7 @@ table,th,td {
 <script type='module' async defer>
 'use strict';
 
-import { HarfBuzzShaping, jsonToSvg } from './js/hbshaping.mjs';
+import { HarfBuzzShaping, jsonToSvg } from './js/hbshaping.mjs?v=2';   // ?v= busts stale browser caches after changes
 const hbs = new HarfBuzzShaping;
 
 const promises = [
@@ -58,14 +59,14 @@ async function onResourcesLoaded() {
 
 </script>
 
-<h1>Windows Shaping Compare Visualizer</h1>
+<h1>Shaping Compare Visualizer</h1>
 <div id='divLOAD'>
   <h2>Load Files</h2>
   <table border=1 width='75%' id='ddFiles'>
     <tr>
       <td width='15%'>1. Word List</td>
       <td width='25%' id='ddWscFile'>
-        Drag Windows Shaping Compare <b>*.wsc.txt</b> file
+        Drag Shaping Compare <b>*.wsc.txt</b> (differences) or a raw shaping dump <b>*.dws.txt</b> (DirectWrite) / <b>*.cts.txt</b> (Core Text)<br/><small>Dumps are compared with HarfBuzz here; they need the font. Script <input id='inpScript' size=5 placeholder='auto'> Language <input id='inpLang' size=5 placeholder='auto'> (blank = HarfBuzz guesses; Urdu: arab / urd)</small>
       </td>
       <td width='30%'>
         <span id='ddWscFileName'></span>
@@ -212,6 +213,7 @@ function glyphTextToArray(glyphText) {
       dx: Number(ga[1]),
       dy: Number(ga[2]),
       ax: Number(ga[3]),
+      rt: ga.length > 4 ? Number(ga[4]) : undefined,   // optional: glyph came from a right-to-left run (scdw >= 1.2)
     });
   });
   return glyphs;
@@ -258,7 +260,7 @@ function drawnGlyphs(glyphs, directWriteRtl) {
   const xs = [];
   for (let i=0; i<glyphs.length; i++) {
     const g = glyphs[i];
-    xs.push(pen + g.dx + (directWriteRtl ? g.ax - nominalAdv(g.g) : 0));
+    xs.push(pen + g.dx + (directWriteRtl && (g.rt === undefined || g.rt === 1) ? g.ax - nominalAdv(g.g) : 0));
     pen += g.ax;
   }
   return { xs: xs, total: pen };
@@ -716,6 +718,7 @@ async function handleDropTTF(fileObject) {
   const file = fileObject.file;
   const filename = fileObject.filename;
   const buff = await file.arrayBuffer();
+  fontBuffer = buff; fontToken++;   // a new font invalidates the dump workers' HarfBuzz caches
   nominalCache.clear();
   hbs.setFontBlob(buff);
   ddFontFileName.innerText = filename;
@@ -724,11 +727,142 @@ async function handleDropTTF(fileObject) {
   decideButtonProcessEnable();
 }
 
+/*
+ * Raw shaping dumps (*.dws.txt DirectWrite, *.cts.txt Core Text; SHAPING-DUMP-SPEC.md).
+ * They hold every word's engine output but no HarfBuzz data: the words are shaped here with HarfBuzz and compared, and the result
+ * feeds the same viewer as a *.wsc.txt (all words are kept, so the "Same" filter works too). Needs the font.
+ */
+let dumpFiles = [];   // [{filename, text}] waiting for / used by the comparison
+let fontToken = 0;    // bumped for every dropped font: a new font always clears the workers' shaping caches
+let fontBuffer = null;
+
+/*
+ * The comparison runs in a pool of workers (js/dumpworker.js), each with its own HarfBuzz. A word always goes to the same worker (hash),
+ * and each worker caches its HarfBuzz results, so a second dump of the same corpus - or the same dump again - is not reshaped.
+ * The cache is dropped when a new font is loaded or the script/language boxes change.
+ */
+const dumpPool = { workers: [], config: '', next: 1, waiting: new Map() };
+function poolSize() { return Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)); }
+function poolWorker(k) {
+  let w = dumpPool.workers[k];
+  if (!w) {
+    w = dumpPool.workers[k] = new Worker('./js/dumpworker.js?v=4');
+    w.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.type === 'result') { const cb = dumpPool.waiting.get(m.jobId); if (cb) cb(m); }
+      else if (m.type === 'progress') { if (dumpPool.onProgress) dumpPool.onProgress(m); }
+      else if (m.type === 'inited') { const cb = dumpPool.waiting.get('init' + k); if (cb) cb(m); }
+      else if (m.type === 'error') { divError.innerText = 'Dump worker error: ' + m.message; console.error(m.stack); }
+    };
+  }
+  return w;
+}
+function waitFor(key) { return new Promise((resolve) => dumpPool.waiting.set(key, (m) => { dumpPool.waiting.delete(key); resolve(m); })); }
+const hashWord = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+
+async function buildFromDumps() {
+  if (!dumpFiles.length || !fontFile?.loaded || !fontBuffer) return;
+  const core = await import('./js/shapedump-core.mjs?v=3');
+  const scriptTxt = (document.getElementById('inpScript')?.value || '').trim(), langTxt = (document.getElementById('inpLang')?.value || '').trim();
+  hbs.setScriptLanguage(scriptTxt || null, langTxt || null);
+  const N = poolSize();
+  // (re)initialise the workers when the font, script or language changed (this clears their caches)
+  const config = [fontToken, scriptTxt, langTxt, N].join('|');
+  if (config !== dumpPool.config) {
+    for (let k = dumpPool.workers.length - 1; k >= N; k--) { dumpPool.workers[k].terminate(); dumpPool.workers.pop(); }
+    progressPanel.start(1, 'Starting HarfBuzz workers');
+    const inits = [];
+    for (let k = 0; k < N; k++) { const p = waitFor('init' + k); poolWorker(k).postMessage({ type: 'init', font: fontBuffer.slice(0), script: scriptTxt, language: langTxt }); inits.push(p); }
+    await Promise.all(inits);
+    dumpPool.config = config;
+    progressPanel.done();
+  }
+  const res = []; const byWord = new Map(); const shapers = new Set(['hb']);
+  let header = {};
+  for (const df of dumpFiles) {
+    const head = core.parseDump(df.text.slice(0, 6000));
+    const engine = head.engine || (/\.dws\./i.test(df.filename) ? 'dn' : 'ct');
+    header = Object.assign(header, head.header);
+    shapers.add(engine);
+    // split the text into records (cheap string scan) and hand them to the workers by hash of the word
+    const words = [], bodies = [];
+    const text = df.text; let pos = text.charCodeAt(0) === 0xFEFF ? 1 : 0, cur = null;
+    let scanned = 0;
+    progressPanel.start(100, 'Reading ' + df.filename);
+    while (pos < text.length) {
+      if ((++scanned & 32767) === 0) { progressPanel.setProgress(Math.round(100 * pos / text.length)); await new Promise((r) => setTimeout(r, 0)); }   // keep the page alive
+      let e = text.indexOf('\n', pos); if (e < 0) e = text.length;
+      let end = e; if (end > pos && text.charCodeAt(end - 1) === 13) end--;
+      if (end > pos) {
+        if (text.charCodeAt(pos) !== 9) cur = text.slice(pos, end);
+        else if (cur !== null && text.charCodeAt(pos + 1) !== 35 && text.charCodeAt(pos + 3) === 58) { words.push(cur); bodies.push(text.slice(pos + 4, end)); cur = null; }  // "\tdn:" / "\tct:"; "!" errors are skipped
+        else if (cur !== null && text.charCodeAt(pos + 1) !== 35) cur = null;
+      }
+      pos = e + 1;
+    }
+    const total = words.length, kinds = new Uint8Array(total), hbStr = new Array(total);
+    const jobHeader = { RTL: head.header.RTL || '', BIDI: head.header.BIDI || '' };
+    const per = Array.from({ length: N }, () => ({ idx: [], words: [], bodies: [] }));
+    for (let i = 0; i < total; i++) { const q = per[hashWord(words[i]) % N]; q.idx.push(i); q.words.push(words[i]); q.bodies.push(bodies[i]); }
+    progressPanel.start(total, 'Comparing ' + df.filename + ' with HarfBuzz (' + N + ' workers)');
+    let done = 0; const BATCH = 400, jobs = [], reported = new Map();
+    dumpPool.onProgress = (m) => { done += m.done - (reported.get(m.jobId) || 0); reported.set(m.jobId, m.done); progressPanel.setProgress(done); };
+    for (let k = 0; k < N; k++) {
+      const q = per[k];
+      for (let i = 0; i < q.idx.length; i += BATCH) {
+        const jobId = dumpPool.next++;
+        const p = waitFor(jobId).then((m) => {
+          for (let j = 0; j < m.ids.length; j++) { kinds[m.ids[j]] = m.kinds[j]; hbStr[m.ids[j]] = m.hbs[j]; }
+          done += m.ids.length - (reported.get(jobId) || 0); reported.set(jobId, m.ids.length); progressPanel.setProgress(done);
+        });
+        poolWorker(k).postMessage({ type: 'job', jobId, engine, header: jobHeader, tolerance: Number(wscDiffs?.tolerance) || 2,
+          idx: q.idx.slice(i, i + BATCH), words: q.words.slice(i, i + BATCH), bodies: q.bodies.slice(i, i + BATCH) });
+        jobs.push(p);
+      }
+    }
+    await Promise.all(jobs);
+    dumpPool.onProgress = null;
+    progressPanel.done();
+    for (let i = 0; i < total; i++) {
+      if ((i & 32767) === 0 && i) await new Promise((r) => setTimeout(r, 0));
+      let e = byWord.get(words[i]);
+      if (!e) { e = { w: words[i], hb: { g: hbStr[i] ?? '' } }; byWord.set(words[i], e); res.push(e); }
+      e[engine] = { g: bodies[i] };
+      if (kinds[i]) e[engine].fail = true;
+    }
+  }
+  res.fontName = header.FONTNAME; res.fontVersion = header.FONTVERS; res.wordFile = header.WORDFILE; res.tool = header.TOOL;
+  res.fontFile = header.FONTFILE; res.tolerance = 2; res.rtl = /^y/i.test(header.RTL || '');
+  res.compare = res.rtl ? 'drawn-positions(visual order)' : 'raw'; res.drawn = res.rtl;
+  let fail = 0;
+  for (const e of res) if (e.dn?.fail || e.ct?.fail) fail++;
+  res.stats = { fail, good: res.length - fail, total: res.length, shapers };
+  wscDiffs = res;
+  wscFile = { filename: dumpFiles.map(d => d.filename).join(' + '), loaded: res.length > 0 };
+  ddWscFileName.innerText = wscFile.filename;
+  ddWscFileResult.innerHTML = `${res.length} words (from dump)<br/>${fail} differ from HarfBuzz<br/>${res.length - fail} same`;
+  headHarfBuzz.hidden = false;
+  const hasDW = shapers.has('dn'), hasCT = shapers.has('ct');
+  headDirectWrite.hidden = !hasDW; tdDirectWrite.hidden = !hasDW; tdGlyphsDirectWrite.hidden = !hasDW;
+  headUniscribe.hidden = true; tdUniscribe.hidden = true; tdGlyphsUniscribe.hidden = true;
+  headCoreText.hidden = !hasCT; tdCoreText.hidden = !hasCT; tdGlyphsCoreText.hidden = !hasCT;
+  decideButtonProcessEnable();
+}
+
 async function handleDropFiles(file, event, files) {
   for (let i=0; i<files.length; i++) {
     file = files[i];
     const filename = file.name.toLowerCase();
+    if (filename.endsWith('.dws.txt') || filename.endsWith('.cts.txt') || filename.endsWith('.ct.txt')) {
+      const text = await file.text();
+      dumpFiles = dumpFiles.filter(d => d.filename !== filename);
+      dumpFiles.push({filename: filename, text: text});
+      if (fontFile?.loaded) await buildFromDumps();
+      else ddWscFileName.innerText = dumpFiles.map(d => d.filename).join(' + ') + ' (drop the font to compare)';
+    }
+    else
     if (filename.endsWith('.wsc.txt')) {
+      dumpFiles = [];
       wscFile = {file:file, filename:filename};
       await handleDropWsc(wscFile);
     }
@@ -736,6 +870,7 @@ async function handleDropFiles(file, event, files) {
     if (filename.endsWith('.ttf')) {
       fontFile = {file:file, filename:filename};
       await handleDropTTF(fontFile);
+      if (dumpFiles.length) await buildFromDumps();
     }
     else
       window.alert(`File extension "${filename}" not known`);
@@ -777,6 +912,6 @@ patchEventInput(updateCheckboxes, [cbGlyphColors, cbHighlight, cbBaseline]);
 </script>
 
 <br/>
-2026-11-06 09:10
+2026-11-19 17:05
 </body>
 </html>
