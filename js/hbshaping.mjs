@@ -175,10 +175,11 @@ class HarfBuzzShaping {
    * @return {buffer} - HarfBuzz buffer.
    * @note Use buffer.destroy() when done.
    */
-  _createBuffer(txt) {
+  _createBuffer(txt, direction) {
     let buffer = this.hb.createBuffer();
     buffer.addText(txt);
     buffer.guessSegmentProperties();
+    if (direction === 'rtl' || direction === 'ltr') buffer.setDirection(direction);   // optional override (shaping dumps are compared in a known paragraph direction)
     if ((typeof this.script === 'string') && (this.script.length > 0)) {
       buffer.setScript(this.script);
     }
@@ -187,8 +188,8 @@ class HarfBuzzShaping {
     }
     return buffer;
   }
-  shape(txt) {
-    let buffer = this._createBuffer(txt);
+  shape(txt, direction) {
+    let buffer = this._createBuffer(txt, direction);
     if (!this.hbFix) {
       this.hb.shape(this.font, buffer, this.features, 0);
     } else {
